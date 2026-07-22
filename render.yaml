@@ -5,6 +5,10 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: AIPIPE_API_KEY
+        sync: false
+      - key: AIPIPE_MODEL
+        value: gpt-4o-mini
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL

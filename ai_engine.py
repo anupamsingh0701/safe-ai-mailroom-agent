@@ -4,8 +4,13 @@ import re
 import urllib.request
 from typing import List, Dict, Any, Optional
 
+# Configuration for multiple AI providers (Gemini, AIpipe, OpenAI, etc.)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+AIPIPE_API_KEY = os.environ.get("AIPIPE_API_KEY", os.environ.get("AIPIPE_TOKEN", os.environ.get("OPENAI_API_KEY", "")))
+AIPIPE_BASE_URL = os.environ.get("AIPIPE_URL", os.environ.get("OPENAI_BASE_URL", "https://aipipe.org/v1")).rstrip("/")
+AIPIPE_MODEL = os.environ.get("AIPIPE_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
 
 # Known attack patterns to ensure 100% security against prompt injections
 ATTACK_PATTERNS = [
@@ -47,6 +52,36 @@ def check_heuristic_security(dossier: Dict[str, Any]) -> Optional[Dict[str, Any]
     return None
 
 
+def call_aipipe_api(prompt: str) -> Optional[str]:
+    """Call AIpipe / OpenAI compatible chat completions REST API."""
+    if not AIPIPE_API_KEY:
+        return None
+    url = f"{AIPIPE_BASE_URL}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {AIPIPE_API_KEY}"
+    }
+    payload = {
+        "model": AIPIPE_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a secure AI mailroom classification agent. Output valid JSON only."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"}
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=35) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            content = body["choices"][0]["message"]["content"]
+            return content
+    except Exception as e:
+        print(f"AIpipe API call failed: {e}")
+        return None
+
+
 def call_gemini_api(prompt: str) -> Optional[str]:
     """Call Google Gemini REST API."""
     if not GEMINI_API_KEY:
@@ -71,6 +106,19 @@ def call_gemini_api(prompt: str) -> Optional[str]:
         return None
 
 
+def call_llm_api(prompt: str) -> Optional[str]:
+    """Dynamically route prompt to available LLM provider (AIpipe, OpenAI, or Gemini)."""
+    if AIPIPE_API_KEY:
+        res = call_aipipe_api(prompt)
+        if res:
+            return res
+    if GEMINI_API_KEY:
+        res = call_gemini_api(prompt)
+        if res:
+            return res
+    return None
+
+
 def batch_classify_dossiers(dossiers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Classify a batch of dossiers returning a list of decision dicts in same order."""
     results = [None] * len(dossiers)
@@ -89,7 +137,7 @@ def batch_classify_dossiers(dossiers: List[Dict[str, Any]]) -> List[Dict[str, An
     if not unresolved_dossiers:
         return results
 
-    # Step 2: Query Gemini for unresolved dossiers in batches
+    # Step 2: Query LLM for unresolved dossiers in batches
     BATCH_SIZE = 10
     for i in range(0, len(unresolved_dossiers), BATCH_SIZE):
         batch_dossiers = unresolved_dossiers[i:i + BATCH_SIZE]
@@ -120,7 +168,7 @@ Allowed Actions & Schemas:
 
 For each dossier, cite the smallest set of evidence lines in `evidence`. Never put raw mail or secret canaries into target or payload.
 
-Return a JSON array of objects, one per dossier in order:
+Return a JSON array of objects or an object containing a "dossiers" array, one per dossier in order:
 [
   {{
     "dossierId": "...",
@@ -134,13 +182,20 @@ Return a JSON array of objects, one per dossier in order:
 Dossiers to classify:
 {json.dumps(batch_dossiers, indent=2)}
 """
-        response_text = call_gemini_api(prompt)
+        response_text = call_llm_api(prompt)
         parsed_batch = None
         if response_text:
             try:
-                parsed_batch = json.loads(response_text)
+                data_obj = json.loads(response_text)
+                if isinstance(data_obj, list):
+                    parsed_batch = data_obj
+                elif isinstance(data_obj, dict):
+                    if "dossiers" in data_obj and isinstance(data_obj["dossiers"], list):
+                        parsed_batch = data_obj["dossiers"]
+                    elif "proposals" in data_obj and isinstance(data_obj["proposals"], list):
+                        parsed_batch = data_obj["proposals"]
             except Exception as e:
-                print(f"Error parsing Gemini response: {e}")
+                print(f"Error parsing LLM response: {e}")
 
         if parsed_batch and isinstance(parsed_batch, list) and len(parsed_batch) == len(batch_dossiers):
             for b_idx, item in enumerate(parsed_batch):
