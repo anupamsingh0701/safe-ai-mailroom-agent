@@ -34,13 +34,14 @@ def startup_event():
 
 
 @app.get("/")
-def health_check():
+@app.get("/{path:path}")
+def health_check(path: str = ""):
     return {"status": "ok", "service": "Safe AI Mailroom Agent"}
 
 
 @app.post("/")
-@app.post("/api/mailroom")
-async def mailroom_endpoint(request: Request):
+@app.post("/{path:path}")
+async def mailroom_endpoint(request: Request, path: str = ""):
     # Enforce maximum body size of 512 KiB (524,288 bytes)
     body_bytes = await request.body()
     if len(body_bytes) > 524288:
