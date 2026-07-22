@@ -60,6 +60,10 @@ def test_propose_and_commit_flow():
 
     prop1 = data_prop["proposals"][0]
     prop2 = data_prop["proposals"][1]
+
+    # Verify inputDigest presence
+    assert "inputDigest" in prop1
+    assert "inputDigest" in prop2
     assert prop2["action"] == "quarantine_item"
 
     # Commit flow
@@ -71,12 +75,14 @@ def test_propose_and_commit_flow():
                 "callId": prop1["callId"],
                 "action": prop1["action"],
                 "proposalDigest": prop1["proposalDigest"],
+                "inputDigest": prop1["inputDigest"],
                 "status": "approved"
             },
             {
                 "callId": prop2["callId"],
                 "action": prop2["action"],
                 "proposalDigest": prop2["proposalDigest"],
+                "inputDigest": prop2["inputDigest"],
                 "status": "approved"
             }
         ]
@@ -86,6 +92,7 @@ def test_propose_and_commit_flow():
     data_commit = res_commit.json()
     assert data_commit["status"] == "completed"
     assert len(data_commit["outcomes"]) == 2
+    assert "inputDigest" in data_commit["outcomes"][0]
 
 
 def test_exact_replay_and_409_conflict():
@@ -139,7 +146,7 @@ def test_invalid_receipt_verification():
     res_bad1 = client.post("/", json=bad_commit_1)
     assert res_bad1.status_code == 400
 
-    # Bad digest in receipt
+    # Bad inputDigest in receipt
     bad_commit_2 = {
         "operation": "commit",
         "evaluationId": "eval_bad_rcpt",
@@ -147,7 +154,8 @@ def test_invalid_receipt_verification():
             {
                 "callId": prop["callId"],
                 "action": prop["action"],
-                "proposalDigest": "invalid_digest_hash_123"  # Bad digest!
+                "inputDigest": "invalid_input_digest_123",
+                "proposalDigest": prop["proposalDigest"]
             }
         ]
     }
@@ -170,13 +178,13 @@ def test_canonical_caching_across_evaluations():
     eval2 = {
         "operation": "propose",
         "evaluationId": "eval_cache_2",
-        "dossiers": [{"dossierId": "dos_beta", "mail": "Identical mail content for caching test"}]
+        "dossiers": [{"dossierId": "dos_alpha", "mail": "Identical mail content for caching test"}]
     }
     res2 = client.post("/", json=eval2)
     assert res2.status_code == 200
     prop2 = res2.json()["proposals"][0]
 
-    # CallId must be identical because canonical content is identical!
+    # CallId must be identical because dossierId and canonical content are identical!
     assert prop1["callId"] == prop2["callId"]
+    assert prop1["inputDigest"] == prop2["inputDigest"]
     assert prop1["action"] == prop2["action"]
-    assert prop2["dossierId"] == "dos_beta"

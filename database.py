@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import os
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 
 DB_PATH = os.environ.get("DATABASE_PATH", "mailroom.db")
 
@@ -23,7 +23,6 @@ def init_db():
         target_json TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         evidence_json TEXT NOT NULL,
-        call_id TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
@@ -45,6 +44,7 @@ def init_db():
         evaluation_id TEXT NOT NULL,
         dossier_id TEXT NOT NULL,
         call_id TEXT NOT NULL,
+        input_digest TEXT NOT NULL,
         action TEXT NOT NULL,
         target_json TEXT NOT NULL,
         payload_json TEXT NOT NULL,
@@ -76,7 +76,7 @@ def init_db():
 def get_cached_decision(content_hash: str) -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT action, target_json, payload_json, evidence_json, call_id FROM canonical_cache WHERE content_hash = ?", (content_hash,))
+    cursor.execute("SELECT action, target_json, payload_json, evidence_json FROM canonical_cache WHERE content_hash = ?", (content_hash,))
     row = cursor.fetchone()
     conn.close()
     if row:
@@ -84,19 +84,18 @@ def get_cached_decision(content_hash: str) -> Optional[Dict[str, Any]]:
             "action": row["action"],
             "target": json.loads(row["target_json"]),
             "payload": json.loads(row["payload_json"]),
-            "evidence": json.loads(row["evidence_json"]),
-            "callId": row["call_id"]
+            "evidence": json.loads(row["evidence_json"])
         }
     return None
 
 
-def set_cached_decision(content_hash: str, action: str, target: dict, payload: dict, evidence: list, call_id: str):
+def set_cached_decision(content_hash: str, action: str, target: dict, payload: dict, evidence: list):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-    INSERT OR REPLACE INTO canonical_cache (content_hash, action, target_json, payload_json, evidence_json, call_id)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, (content_hash, action, json.dumps(target), json.dumps(payload), json.dumps(evidence), call_id))
+    INSERT OR REPLACE INTO canonical_cache (content_hash, action, target_json, payload_json, evidence_json)
+    VALUES (?, ?, ?, ?, ?)
+    """, (content_hash, action, json.dumps(target), json.dumps(payload), json.dumps(evidence)))
     conn.commit()
     conn.close()
 
@@ -144,12 +143,13 @@ def save_proposals(evaluation_id: str, proposals: List[dict]):
     cursor = conn.cursor()
     for p in proposals:
         cursor.execute("""
-        INSERT OR REPLACE INTO proposals (evaluation_id, dossier_id, call_id, action, target_json, payload_json, evidence_json, proposal_digest)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO proposals (evaluation_id, dossier_id, call_id, input_digest, action, target_json, payload_json, evidence_json, proposal_digest)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             evaluation_id,
             p["dossierId"],
             p["callId"],
+            p["inputDigest"],
             p["action"],
             json.dumps(p["target"]),
             json.dumps(p["payload"]),
@@ -171,6 +171,7 @@ def get_proposals_for_eval(evaluation_id: str) -> List[Dict[str, Any]]:
         result.append({
             "dossierId": r["dossier_id"],
             "callId": r["call_id"],
+            "inputDigest": r["input_digest"],
             "action": r["action"],
             "target": json.loads(r["target_json"]),
             "payload": json.loads(r["payload_json"]),

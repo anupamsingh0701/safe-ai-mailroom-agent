@@ -1,5 +1,7 @@
 import json
 import os
+import hmac
+import hashlib
 from typing import Dict, Any
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -116,7 +118,7 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
     existing_eval = get_evaluation(evaluation_id)
     if existing_eval:
         if existing_eval["propose_hash"] == propose_hash:
-            # Replay return exact saved response
+            # Exact propose replay -> return exact cached response
             cached_resp = json.loads(existing_eval["propose_response_json"])
             return JSONResponse(content=cached_resp, status_code=200)
         else:
@@ -126,26 +128,28 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail="Evaluation ID already exists with different propose content"
             )
 
-    # Process dossiers
     proposals = []
     uncached_dossiers = []
     uncached_indices = []
 
     for idx, d in enumerate(dossiers):
         did = d.get("dossierId") or d.get("id")
+        input_digest = d.get("inputDigest") or get_canonical_dossier_hash(d)
+        call_id = compute_call_id(did, input_digest)
+
         content_hash = get_canonical_dossier_hash(d)
         cached_dec = get_cached_decision(content_hash)
 
         if cached_dec:
-            call_id = cached_dec["callId"]
             action = cached_dec["action"]
             target = cached_dec["target"]
             payload = cached_dec["payload"]
             evidence = cached_dec["evidence"]
-            digest = compute_proposal_digest(did, call_id, action, target, payload, evidence)
+            digest = compute_proposal_digest(did, call_id, input_digest, action, target, payload, evidence)
             proposals.append({
                 "dossierId": did,
                 "callId": call_id,
+                "inputDigest": input_digest,
                 "action": action,
                 "target": target,
                 "payload": payload,
@@ -153,26 +157,26 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 "proposalDigest": digest
             })
         else:
-            uncached_indices.append((idx, did, content_hash))
+            uncached_indices.append((idx, did, input_digest, call_id, content_hash))
             uncached_dossiers.append(d)
 
     # Classify uncached dossiers
     if uncached_dossiers:
         ai_results = batch_classify_dossiers(uncached_dossiers)
-        for (idx, did, content_hash), res in zip(uncached_indices, ai_results):
-            call_id = compute_call_id(dossiers[idx])
+        for (idx, did, input_digest, call_id, content_hash), res in zip(uncached_indices, ai_results):
             action = res["action"]
             target = res["target"]
             payload = res["payload"]
             evidence = res["evidence"]
 
-            # Store in canonical cache
-            set_cached_decision(content_hash, action, target, payload, evidence, call_id)
+            # Cache by canonical content hash
+            set_cached_decision(content_hash, action, target, payload, evidence)
 
-            digest = compute_proposal_digest(did, call_id, action, target, payload, evidence)
+            digest = compute_proposal_digest(did, call_id, input_digest, action, target, payload, evidence)
             proposals.append({
                 "dossierId": did,
                 "callId": call_id,
+                "inputDigest": input_digest,
                 "action": action,
                 "target": target,
                 "payload": payload,
@@ -180,7 +184,7 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 "proposalDigest": digest
             })
 
-    # Sort proposals to match original dossiers order
+    # Preserve original dossiers order
     proposal_map = {p["dossierId"]: p for p in proposals}
     ordered_proposals = [proposal_map[d.get("dossierId") or d.get("id")] for d in dossiers]
 
@@ -189,7 +193,7 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
         "proposals": ordered_proposals
     }
 
-    receipt_key = data.get("receiptKey") or data.get("verificationKey")
+    receipt_key = data.get("receiptKey") or data.get("verificationKey") or data.get("receipt_key")
     save_propose_evaluation(evaluation_id, propose_hash, response_body, receipt_key)
     save_proposals(evaluation_id, ordered_proposals)
 
@@ -198,7 +202,7 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
 
 async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
     receipts = data.get("receipts")
-    if receipts is None or not isinstance(receipts, list):
+    if receipts is None or not isinstance(receipts, list) or len(receipts) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing or invalid receipts array"
@@ -244,6 +248,8 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
     by_call_id = {p["callId"]: p for p in stored_proposals}
     by_dossier_id = {p["dossierId"]: p for p in stored_proposals}
 
+    receipt_key = existing_eval.get("receipt_key")
+
     outcomes = []
     for r in receipts:
         if not isinstance(r, dict):
@@ -267,12 +273,34 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail=f"Receipt contains unknown callId '{call_id}' or dossierId '{dossier_id}'"
             )
 
+        # Verify callId if present in receipt
+        if call_id and call_id != matched_proposal["callId"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Receipt callId '{call_id}' mismatch"
+            )
+
+        # Verify dossierId if present in receipt
+        if dossier_id and dossier_id != matched_proposal["dossierId"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Receipt dossierId '{dossier_id}' mismatch"
+            )
+
+        # Verify inputDigest if present in receipt
+        rcpt_input_digest = r.get("inputDigest")
+        if rcpt_input_digest and rcpt_input_digest != matched_proposal["inputDigest"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Receipt inputDigest '{rcpt_input_digest}' mismatch"
+            )
+
         # Verify receipt matching action
         rcpt_action = r.get("action")
         if rcpt_action and rcpt_action != matched_proposal["action"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Receipt action '{rcpt_action}' does not match proposal action '{matched_proposal['action']}'"
+                detail=f"Receipt action '{rcpt_action}' mismatch"
             )
 
         # Verify proposal digest if present in receipt
@@ -283,12 +311,32 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail=f"Receipt proposal digest mismatch for callId '{matched_proposal['callId']}'"
             )
 
-        rcpt_status = r.get("status", "approved")
-        outcome_status = "executed" if rcpt_status in {"approved", "executed", "ok", "success"} else "rejected"
+        # Optional HMAC signature verification if receiptKey was provided
+        rcpt_sig = r.get("signature") or r.get("mac") or r.get("receiptSignature")
+        if receipt_key and rcpt_sig:
+            sig_payload = f"{matched_proposal['callId']}:{matched_proposal['action']}:{matched_proposal['proposalDigest']}"
+            expected_sig = hmac.new(receipt_key.encode('utf-8'), sig_payload.encode('utf-8'), hashlib.sha256).hexdigest()
+            if rcpt_sig != expected_sig:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Receipt signature verification failed"
+                )
+
+        rcpt_status = str(r.get("status", "approved")).lower()
+        if rcpt_status in {"approved", "executed", "ok", "success", "completed"}:
+            outcome_status = "executed"
+        elif rcpt_status in {"rejected", "failed", "denied"}:
+            outcome_status = "rejected"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid receipt status '{rcpt_status}'"
+            )
 
         outcomes.append({
             "dossierId": matched_proposal["dossierId"],
             "callId": matched_proposal["callId"],
+            "inputDigest": matched_proposal["inputDigest"],
             "action": matched_proposal["action"],
             "status": outcome_status,
             "receiptId": r.get("receiptId") or r.get("receipt") or "rcpt_valid"
