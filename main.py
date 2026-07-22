@@ -92,8 +92,9 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
             detail="Missing or invalid dossiers array"
         )
 
-    # Check for duplicate dossier IDs
+    # Validate dossier format & check for duplicate dossier IDs
     dossier_ids = set()
+    incoming_dossier_ids = []
     for d in dossiers:
         if not isinstance(d, dict):
             raise HTTPException(
@@ -101,10 +102,10 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail="Each dossier must be an object"
             )
         did = d.get("dossierId") or d.get("id")
-        if not did:
+        if not did or not isinstance(did, str):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Dossier missing dossierId"
+                detail="Dossier missing valid dossierId"
             )
         if did in dossier_ids:
             raise HTTPException(
@@ -112,10 +113,11 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail=f"Duplicate dossierId '{did}' in propose request"
             )
         dossier_ids.add(did)
+        incoming_dossier_ids.append(did)
 
     propose_hash = get_canonical_hash(data)
 
-    # Check for existing evaluation
+    # Replay & Conflict check
     existing_eval = get_evaluation(evaluation_id)
     if existing_eval:
         if existing_eval["propose_hash"] == propose_hash:
@@ -123,7 +125,7 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
             cached_resp = json.loads(existing_eval["propose_response_json"])
             return JSONResponse(content=cached_resp, status_code=200)
         else:
-            # Same evaluationId with changed content -> HTTP 409 Conflict
+            # Changed content for same evaluationId -> HTTP 409 Conflict
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Evaluation ID already exists with different propose content"
@@ -228,10 +230,11 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
 
     commit_hash = get_canonical_hash(data)
 
-    # Check for commit replay or conflict
-    if existing_eval.get("commit_hash"):
-        if existing_eval["commit_hash"] == commit_hash:
-            cached_resp = json.loads(existing_eval["commit_response_json"])
+    # Replay & Conflict check for commit
+    if existing_eval.get("commit_response_json"):
+        stored_commit_hash = existing_eval.get("commit_hash")
+        cached_resp = json.loads(existing_eval["commit_response_json"])
+        if stored_commit_hash == commit_hash:
             return JSONResponse(content=cached_resp, status_code=200)
         else:
             raise HTTPException(
@@ -274,21 +277,19 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail=f"Receipt contains unknown callId '{call_id}' or dossierId '{dossier_id}'"
             )
 
-        # Verify callId if present in receipt
+        # Strict validation of receipt fields
         if call_id and call_id != matched_proposal["callId"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Receipt callId '{call_id}' mismatch"
             )
 
-        # Verify dossierId if present in receipt
         if dossier_id and dossier_id != matched_proposal["dossierId"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Receipt dossierId '{dossier_id}' mismatch"
             )
 
-        # Verify inputDigest if present in receipt
         rcpt_input_digest = r.get("inputDigest")
         if rcpt_input_digest and rcpt_input_digest != matched_proposal["inputDigest"]:
             raise HTTPException(
@@ -296,7 +297,6 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail=f"Receipt inputDigest '{rcpt_input_digest}' mismatch"
             )
 
-        # Verify receipt matching action
         rcpt_action = r.get("action")
         if rcpt_action and rcpt_action != matched_proposal["action"]:
             raise HTTPException(
@@ -304,7 +304,6 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail=f"Receipt action '{rcpt_action}' mismatch"
             )
 
-        # Verify proposal digest if present in receipt
         rcpt_digest = r.get("proposalDigest") or r.get("digest")
         if rcpt_digest and rcpt_digest != matched_proposal["proposalDigest"]:
             raise HTTPException(
@@ -312,7 +311,6 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail=f"Receipt proposal digest mismatch for callId '{matched_proposal['callId']}'"
             )
 
-        # Optional HMAC signature verification if receiptKey was provided
         rcpt_sig = r.get("signature") or r.get("mac") or r.get("receiptSignature")
         if receipt_key and rcpt_sig:
             sig_payload = f"{matched_proposal['callId']}:{matched_proposal['action']}:{matched_proposal['proposalDigest']}"
@@ -323,7 +321,14 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                     detail="Receipt signature verification failed"
                 )
 
-        rcpt_status = str(r.get("status", "approved")).lower()
+        raw_status = r.get("status")
+        if not raw_status or not isinstance(raw_status, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Receipt missing status string"
+            )
+
+        rcpt_status = raw_status.lower()
         if rcpt_status in {"approved", "executed", "ok", "success", "completed"}:
             outcome_status = "executed"
         elif rcpt_status in {"rejected", "failed", "denied"}:
