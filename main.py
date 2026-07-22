@@ -101,8 +101,8 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Each dossier must be an object"
             )
-        did = d.get("dossierId") or d.get("id") or d.get("dossier_id")
-        if not did or not isinstance(did, str):
+        did = str(d.get("dossierId") or d.get("id") or d.get("dossier_id") or "")
+        if not did:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Dossier missing valid dossierId"
@@ -121,11 +121,9 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
     existing_eval = get_evaluation(evaluation_id)
     if existing_eval:
         if existing_eval["propose_hash"] == propose_hash:
-            # Exact propose replay -> return exact cached response
             cached_resp = json.loads(existing_eval["propose_response_json"])
             return JSONResponse(content=cached_resp, status_code=200)
         else:
-            # Changed content for same evaluationId -> HTTP 409 Conflict
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Evaluation ID already exists with different propose content"
@@ -137,10 +135,10 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
 
     for idx, d in enumerate(dossiers):
         did = str(d.get("dossierId") or d.get("id") or d.get("dossier_id"))
-        input_digest = str(d.get("inputDigest") or d.get("input_digest") or get_canonical_dossier_hash(d))
-        call_id = compute_call_id(did, input_digest)
-
         content_hash = get_canonical_dossier_hash(d)
+        input_digest = str(d.get("inputDigest") or d.get("input_digest") or content_hash)
+        call_id = compute_call_id(did, content_hash)
+
         cached_dec = get_cached_decision(content_hash)
 
         if cached_dec:
@@ -151,13 +149,15 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
             digest = compute_proposal_digest(did, call_id, input_digest, action, target, payload, evidence)
             proposals.append({
                 "dossierId": did,
+                "id": did,
                 "callId": call_id,
                 "inputDigest": input_digest,
                 "action": action,
                 "target": target,
                 "payload": payload,
                 "evidence": evidence,
-                "proposalDigest": digest
+                "proposalDigest": digest,
+                "digest": digest
             })
         else:
             uncached_indices.append((idx, did, input_digest, call_id, content_hash))
@@ -178,13 +178,15 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
             digest = compute_proposal_digest(did, call_id, input_digest, action, target, payload, evidence)
             proposals.append({
                 "dossierId": did,
+                "id": did,
                 "callId": call_id,
                 "inputDigest": input_digest,
                 "action": action,
                 "target": target,
                 "payload": payload,
                 "evidence": evidence,
-                "proposalDigest": digest
+                "proposalDigest": digest,
+                "digest": digest
             })
 
     # Preserve original dossiers order
@@ -204,6 +206,12 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
 
 
 async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Commit request body must be a JSON object"
+        )
+
     receipts = data.get("receipts")
     if receipts is None or not isinstance(receipts, list) or len(receipts) == 0:
         raise HTTPException(
@@ -232,14 +240,21 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
 
     # Replay & Conflict check for commit
     if existing_eval.get("commit_response_json"):
-        stored_commit_hash = existing_eval.get("commit_hash")
         cached_resp = json.loads(existing_eval["commit_response_json"])
-
         stored_outcomes = cached_resp.get("outcomes", [])
-        stored_call_ids = {o["callId"] for o in stored_outcomes}
+        stored_dossier_ids = {o["dossierId"] for o in stored_outcomes if isinstance(o, dict) and o.get("dossierId")}
+        stored_call_ids = {o["callId"] for o in stored_outcomes if isinstance(o, dict) and o.get("callId")}
+
+        incoming_dossier_ids = {r.get("dossierId") or r.get("id") for r in receipts if isinstance(r, dict) and (r.get("dossierId") or r.get("id"))}
         incoming_call_ids = {r.get("callId") for r in receipts if isinstance(r, dict) and r.get("callId")}
 
-        if commit_hash == stored_commit_hash or (incoming_call_ids and incoming_call_ids == stored_call_ids):
+        is_exact_replay = (
+            commit_hash == existing_eval.get("commit_hash") or
+            (incoming_dossier_ids and incoming_dossier_ids == stored_dossier_ids) or
+            (incoming_call_ids and incoming_call_ids == stored_call_ids)
+        )
+
+        if is_exact_replay:
             return JSONResponse(content=cached_resp, status_code=200)
         else:
             raise HTTPException(
@@ -293,10 +308,10 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Receipt missing callId and dossierId"
+                detail="Receipt missing both callId and dossierId"
             )
 
-        # Strict receipt validation
+        # Strict receipt field validation
         rcpt_input_digest = r.get("inputDigest") or r.get("input_digest")
         if rcpt_input_digest and rcpt_input_digest != matched_proposal["inputDigest"]:
             raise HTTPException(
@@ -348,6 +363,7 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
 
         outcomes.append({
             "dossierId": matched_proposal["dossierId"],
+            "id": matched_proposal["dossierId"],
             "callId": matched_proposal["callId"],
             "inputDigest": matched_proposal["inputDigest"],
             "action": matched_proposal["action"],

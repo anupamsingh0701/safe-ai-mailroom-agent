@@ -24,7 +24,7 @@ def get_canonical_dossier_hash(dossier: Dict[str, Any]) -> str:
                 "dossierId", "id", "dossier_id",
                 "evaluationId", "evaluation_id",
                 "inputDigest", "input_digest",
-                "callId", "proposalDigest"
+                "callId", "proposalDigest", "digest"
             }
         }
     else:
@@ -32,9 +32,9 @@ def get_canonical_dossier_hash(dossier: Dict[str, Any]) -> str:
     return get_canonical_hash(content)
 
 
-def compute_call_id(dossier_id: str, input_digest: str) -> str:
-    """Computes a stable, unique callId based on dossier_id and input_digest."""
-    raw = f"{dossier_id}:{input_digest}"
+def compute_call_id(dossier_id: str, content_hash: str) -> str:
+    """Computes a stable, unique callId based on dossier_id and content_hash."""
+    raw = f"{dossier_id}:{content_hash}"
     h = hashlib.sha256(raw.encode('utf-8')).hexdigest()
     return f"call_{h[:16]}"
 
@@ -65,6 +65,7 @@ ALLOWED_ACTIONS = {
 
 class ProposalItem(BaseModel):
     dossierId: str
+    id: Optional[str] = None
     callId: str
     inputDigest: str
     action: str
@@ -72,6 +73,7 @@ class ProposalItem(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
     evidence: List[str] = Field(default_factory=list)
     proposalDigest: str
+    digest: Optional[str] = None
 
 
 class ReceiptItem(BaseModel):
@@ -92,6 +94,7 @@ class ReceiptItem(BaseModel):
 
 class OutcomeItem(BaseModel):
     dossierId: str
+    id: Optional[str] = None
     callId: str
     inputDigest: str
     action: str

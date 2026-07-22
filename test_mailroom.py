@@ -94,6 +94,11 @@ def test_propose_and_commit_flow():
     assert len(data_commit["outcomes"]) == 2
     assert "inputDigest" in data_commit["outcomes"][0]
 
+    # Test commit replay!
+    res_commit_replay = client.post("/", json=commit_payload)
+    assert res_commit_replay.status_code == 200
+    assert res_commit_replay.json() == res_commit.json()
+
 
 def test_exact_replay_and_409_conflict():
     payload1 = {
@@ -174,7 +179,7 @@ def test_canonical_caching_across_evaluations():
     assert res1.status_code == 200
     prop1 = res1.json()["proposals"][0]
 
-    # Evaluation 2 with same dossier content but different evaluationId & dossierId
+    # Evaluation 2 with same dossier content but different evaluationId
     eval2 = {
         "operation": "propose",
         "evaluationId": "eval_cache_2",
