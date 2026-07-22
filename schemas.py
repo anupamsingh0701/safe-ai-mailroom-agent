@@ -16,16 +16,24 @@ def get_canonical_hash(obj: Any) -> str:
 
 
 def get_canonical_dossier_hash(dossier: Dict[str, Any]) -> str:
-    """Returns SHA-256 hex digest of canonical dossier content, excluding volatile dossier ID fields."""
+    """Returns SHA-256 hex digest of canonical dossier content, excluding volatile ID and evaluation fields."""
     if isinstance(dossier, dict):
-        content = {k: v for k, v in dossier.items() if k not in {"dossierId", "id"}}
+        content = {
+            k: v for k, v in dossier.items()
+            if k not in {
+                "dossierId", "id", "dossier_id",
+                "evaluationId", "evaluation_id",
+                "inputDigest", "input_digest",
+                "callId", "proposalDigest"
+            }
+        }
     else:
         content = dossier
     return get_canonical_hash(content)
 
 
 def compute_call_id(dossier_id: str, input_digest: str) -> str:
-    """Computes a stable, unique callId based on dossierId and inputDigest."""
+    """Computes a stable, unique callId based on dossier_id and input_digest."""
     raw = f"{dossier_id}:{input_digest}"
     h = hashlib.sha256(raw.encode('utf-8')).hexdigest()
     return f"call_{h[:16]}"

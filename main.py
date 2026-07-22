@@ -78,7 +78,7 @@ async def mailroom_endpoint(request: Request, path: str = ""):
 
 
 async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
-    evaluation_id = data.get("evaluationId")
+    evaluation_id = data.get("evaluationId") or data.get("evaluation_id")
     if not evaluation_id or not isinstance(evaluation_id, str):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -101,7 +101,7 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Each dossier must be an object"
             )
-        did = d.get("dossierId") or d.get("id")
+        did = d.get("dossierId") or d.get("id") or d.get("dossier_id")
         if not did or not isinstance(did, str):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -136,8 +136,8 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
     uncached_indices = []
 
     for idx, d in enumerate(dossiers):
-        did = d.get("dossierId") or d.get("id")
-        input_digest = d.get("inputDigest") or get_canonical_dossier_hash(d)
+        did = str(d.get("dossierId") or d.get("id") or d.get("dossier_id"))
+        input_digest = str(d.get("inputDigest") or d.get("input_digest") or get_canonical_dossier_hash(d))
         call_id = compute_call_id(did, input_digest)
 
         content_hash = get_canonical_dossier_hash(d)
@@ -189,7 +189,7 @@ async def handle_propose(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
 
     # Preserve original dossiers order
     proposal_map = {p["dossierId"]: p for p in proposals}
-    ordered_proposals = [proposal_map[d.get("dossierId") or d.get("id")] for d in dossiers]
+    ordered_proposals = [proposal_map[str(d.get("dossierId") or d.get("id") or d.get("dossier_id"))] for d in dossiers]
 
     response_body = {
         "status": "awaiting_receipts",
@@ -211,9 +211,9 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
             detail="Missing or invalid receipts array"
         )
 
-    evaluation_id = data.get("evaluationId")
-    if not evaluation_id and len(receipts) > 0:
-        evaluation_id = receipts[0].get("evaluationId")
+    evaluation_id = data.get("evaluationId") or data.get("evaluation_id")
+    if not evaluation_id and len(receipts) > 0 and isinstance(receipts[0], dict):
+        evaluation_id = receipts[0].get("evaluationId") or receipts[0].get("evaluation_id")
 
     if not evaluation_id or not isinstance(evaluation_id, str):
         raise HTTPException(
@@ -234,7 +234,12 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
     if existing_eval.get("commit_response_json"):
         stored_commit_hash = existing_eval.get("commit_hash")
         cached_resp = json.loads(existing_eval["commit_response_json"])
-        if stored_commit_hash == commit_hash:
+
+        stored_outcomes = cached_resp.get("outcomes", [])
+        stored_call_ids = {o["callId"] for o in stored_outcomes}
+        incoming_call_ids = {r.get("callId") for r in receipts if isinstance(r, dict) and r.get("callId")}
+
+        if commit_hash == stored_commit_hash or (incoming_call_ids and incoming_call_ids == stored_call_ids):
             return JSONResponse(content=cached_resp, status_code=200)
         else:
             raise HTTPException(
@@ -263,34 +268,36 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
             )
 
         call_id = r.get("callId")
-        dossier_id = r.get("dossierId")
+        dossier_id = r.get("dossierId") or r.get("id")
         matched_proposal = None
 
-        if call_id and call_id in by_call_id:
+        if call_id:
+            if call_id not in by_call_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Receipt contains unknown callId '{call_id}'"
+                )
             matched_proposal = by_call_id[call_id]
-        elif dossier_id and dossier_id in by_dossier_id:
+            if dossier_id and dossier_id != matched_proposal["dossierId"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Receipt dossierId '{dossier_id}' mismatch with callId proposal"
+                )
+        elif dossier_id:
+            if dossier_id not in by_dossier_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Receipt contains unknown dossierId '{dossier_id}'"
+                )
             matched_proposal = by_dossier_id[dossier_id]
-
-        if not matched_proposal:
+        else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Receipt contains unknown callId '{call_id}' or dossierId '{dossier_id}'"
+                detail="Receipt missing callId and dossierId"
             )
 
-        # Strict validation of receipt fields
-        if call_id and call_id != matched_proposal["callId"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Receipt callId '{call_id}' mismatch"
-            )
-
-        if dossier_id and dossier_id != matched_proposal["dossierId"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Receipt dossierId '{dossier_id}' mismatch"
-            )
-
-        rcpt_input_digest = r.get("inputDigest")
+        # Strict receipt validation
+        rcpt_input_digest = r.get("inputDigest") or r.get("input_digest")
         if rcpt_input_digest and rcpt_input_digest != matched_proposal["inputDigest"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -304,7 +311,7 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
                 detail=f"Receipt action '{rcpt_action}' mismatch"
             )
 
-        rcpt_digest = r.get("proposalDigest") or r.get("digest")
+        rcpt_digest = r.get("proposalDigest") or r.get("digest") or r.get("proposal_digest")
         if rcpt_digest and rcpt_digest != matched_proposal["proposalDigest"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -345,7 +352,7 @@ async def handle_commit(data: Dict[str, Any], raw_body: bytes) -> JSONResponse:
             "inputDigest": matched_proposal["inputDigest"],
             "action": matched_proposal["action"],
             "status": outcome_status,
-            "receiptId": r.get("receiptId") or r.get("receipt") or "rcpt_valid"
+            "receiptId": r.get("receiptId") or r.get("receipt") or r.get("receipt_id") or "rcpt_valid"
         })
 
     response_body = {
